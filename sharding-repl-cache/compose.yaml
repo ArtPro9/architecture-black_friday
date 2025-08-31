@@ -1,0 +1,248 @@
+name: sharding-repl-cache
+services:
+  pymongo-api:
+    container_name: pymongo-api
+    build:
+      context: api_app
+      dockerfile: Dockerfile
+    depends_on:
+      - mongo-setup
+    networks:
+      - app-network
+    ports:
+      - 8080:8080
+    environment:
+      MONGODB_URL: "mongodb://mongos-router:27020"
+      MONGODB_DATABASE_NAME: "somedb"
+      REDIS_URL: "redis://redis:6379"
+
+  configSrv:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: configSrv
+    restart: always
+    ports:
+      - "27017:27017"
+    networks:
+      - app-network
+    volumes:
+      - config-data:/data/db
+    command:
+      [
+        "--configsvr",
+        "--replSet",
+        "config-server",
+        "--bind_ip_all",
+        "--port",
+        "27017"
+      ]
+
+  shard1-primary:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: shard1-primary
+    restart: always
+    ports:
+      - "27018:27018"
+    networks:
+      - app-network
+    volumes:
+      - shard1-primary-data:/data/db
+    command:
+      [
+        "--shardsvr",
+        "--replSet",
+        "shard1",
+        "--bind_ip_all",
+        "--port",
+        "27018"
+      ]
+
+  shard1-secondary-1:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: shard1-secondary-1
+    restart: always
+    ports:
+      - "27028:27018"
+    networks:
+      - app-network
+    volumes:
+      - shard1-secondary-1-data:/data/db
+    command:
+      [
+        "--shardsvr",
+        "--replSet",
+        "shard1",
+        "--bind_ip_all",
+        "--port",
+        "27018"
+      ]
+
+  shard1-secondary-2:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: shard1-secondary-2
+    restart: always
+    ports:
+      - "27038:27018"
+    networks:
+      - app-network
+    volumes:
+      - shard1-secondary-2-data:/data/db
+    command:
+      [
+        "--shardsvr",
+        "--replSet",
+        "shard1",
+        "--bind_ip_all",
+        "--port",
+        "27018"
+      ]
+
+  shard2-primary:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: shard2-primary
+    restart: always
+    ports:
+      - "27019:27019"
+    networks:
+      - app-network
+    volumes:
+      - shard2-primary-data:/data/db
+    command:
+      [
+        "--shardsvr",
+        "--replSet",
+        "shard2",
+        "--bind_ip_all",
+        "--port",
+        "27019"
+      ]
+
+  shard2-secondary-1:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: shard2-secondary-1
+    restart: always
+    ports:
+      - "27029:27019"
+    networks:
+      - app-network
+    volumes:
+      - shard2-secondary-1-data:/data/db
+    command:
+      [
+        "--shardsvr",
+        "--replSet",
+        "shard2",
+        "--bind_ip_all",
+        "--port",
+        "27019"
+      ]
+
+  shard2-secondary-2:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: shard2-secondary-2
+    restart: always
+    ports:
+      - "27039:27019"
+    networks:
+      - app-network
+    volumes:
+      - shard2-secondary-2-data:/data/db
+    command:
+      [
+        "--shardsvr",
+        "--replSet",
+        "shard2",
+        "--bind_ip_all",
+        "--port",
+        "27019"
+      ]
+
+  mongos-router:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: mongos-router
+    restart: always
+    depends_on:
+      - configSrv
+    ports:
+      - "27020:27020"
+    networks:
+      - app-network
+    command:
+      [
+        "mongos",
+        "--configdb",
+        "config-server/configSrv:27017",
+        "--bind_ip_all",
+        "--port",
+        "27020"
+      ]
+
+  mongo-setup:
+    image: dh-mirror.gitverse.ru/mongo:latest
+    container_name: mongo-setup
+    depends_on:
+      - mongos-router
+    networks:
+      - app-network
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "
+      echo 'Waiting for mongod instances to be ready...' &&
+      sleep 30 &&
+      echo 'Initiating config server replica set...' &&
+      mongosh --host configSrv --eval 'rs.initiate({_id: \"config-server\", members: [{ _id: 0, host: \"configSrv:27017\" }]})' &&
+      echo 'Initiating shard1 replica set...' &&
+      mongosh --host shard1-primary --port 27018 --eval '
+        rs.initiate({
+          _id: \"shard1\",
+          members: [
+            { _id: 0, host: \"shard1-primary:27018\" },
+            { _id: 1, host: \"shard1-secondary-1:27018\" },
+            { _id: 2, host: \"shard1-secondary-2:27018\" }
+          ]
+        })' &&
+      echo 'Initiating shard2 replica set...' &&
+      mongosh --host shard2-primary --port 27019 --eval '
+        rs.initiate({
+          _id: \"shard2\",
+          members: [
+            { _id: 0, host: \"shard2-primary:27019\" },
+            { _id: 1, host: \"shard2-secondary-1:27019\" },
+            { _id: 2, host: \"shard2-secondary-2:27019\" }
+          ]
+        })' &&
+      echo 'Waiting for mongos to be ready...' &&
+      sleep 15 &&
+      echo 'Adding shards to mongos...' &&
+      mongosh --host mongos-router --port 27020 --eval '
+        sh.addShard(\"shard1/shard1-primary:27018,shard1-secondary-1:27018,shard1-secondary-2:27018\");
+        sh.addShard(\"shard2/shard2-primary:27019,shard2-secondary-1:27019,shard2-secondary-2:27019\");
+      ' &&
+      echo 'MongoDB sharded cluster setup complete.'
+      "
+    restart: "no"
+
+  redis:
+    image: "redis:latest"
+    container_name: redis
+    ports:
+      - "6379"
+    volumes:
+      - redis_data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: [ "redis-server", "/usr/local/etc/redis/redis.conf" ]
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  config-data:
+  shard1-primary-data:
+  shard1-secondary-1-data:
+  shard1-secondary-2-data:
+  shard2-primary-data:
+  shard2-secondary-1-data:
+  shard2-secondary-2-data:
+  redis_data:
